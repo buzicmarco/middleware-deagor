@@ -13,7 +13,6 @@ const SHOPIFY_LOCATION_ID = process.env.SHOPIFY_LOCATION_ID;
 let cachedToken = null;
 let tokenExpiresAt = 0;
 
-// Funcție automată care obține token-ul de acces folosind Client ID și Client Secret
 async function getAccessToken() {
     if (cachedToken && Date.now() < tokenExpiresAt) {
         return cachedToken;
@@ -25,7 +24,6 @@ async function getAccessToken() {
             grant_type: "client_credentials"
         });
         cachedToken = tokenResponse.data.access_token;
-        // Valabil 24h, reînnoim cu 5 minute înainte
         tokenExpiresAt = Date.now() + (tokenResponse.data.expires_in - 300) * 1000;
         return cachedToken;
     } catch (error) {
@@ -34,7 +32,6 @@ async function getAccessToken() {
     }
 }
 
-// Dictionarul de mapare Pantogar
 const catalogPantogar = {
     "P150": { name: "Pantogar® 150 capsule", ean: "2008331000049" },
     "P300": { name: "Pantogar® 300 capsule", ean: "2008331000056" },
@@ -58,6 +55,61 @@ app.get('/api/getProducts.json', (req, res) => {
         weight: "0.0000"
     }));
     res.json({ data: data });
+});
+
+// Endpoint nou pentru Inventar Real din Shopify
+app.get('/api/getInventory.json', async (req, res) => {
+    try {
+        const token = await getAccessToken();
+        
+        // 1. Preluăm toate produsele din Shopify pentru a mapa SKU-urile la inventory_item_id
+        const prodResponse = await axios.get(
+            `https://${SHOPIFY_DOMAIN}/admin/api/2024-01/products.json`,
+            { headers: { 'X-Shopify-Access-Token': token } }
+        );
+
+        let inventoryItemsMap = {};
+        prodResponse.data.products.forEach(product => {
+            product.variants.forEach(variant => {
+                if (variant.sku) {
+                    inventoryItemsMap[variant.sku] = variant.inventory_item_id;
+                }
+            });
+        });
+
+        let inventoryData = [];
+
+        // 2. Pentru fiecare SKU din catalogul nostru, interogăm stocul pe locație
+        for (const sku of Object.keys(catalogPantogar)) {
+            const inventoryItemId = inventoryItemsMap[sku];
+            let qty = 0;
+
+            if (inventoryItemId && SHOPIFY_LOCATION_ID) {
+                try {
+                    const levelRes = await axios.get(
+                        `https://${SHOPIFY_DOMAIN}/admin/api/2024-01/inventory_levels.json?inventory_item_ids=${inventoryItemId}&location_ids=${SHOPIFY_LOCATION_ID}`,
+                        { headers: { 'X-Shopify-Access-Token': token } }
+                    );
+                    if (levelRes.data.inventory_levels && levelRes.data.inventory_levels.length > 0) {
+                        qty = levelRes.data.inventory_levels[0].available || 0;
+                    }
+                } catch (err) {
+                    console.error(`Eroare stoc pentru SKU ${sku}:`, err.message);
+                }
+            }
+
+            inventoryData.push({
+                sku: sku,
+                location_id: SHOPIFY_LOCATION_ID || "1",
+                qty: qty.toString()
+            });
+        }
+
+        res.json({ data: inventoryData });
+    } catch (error) {
+        console.error("Error fetching inventory:", error.message);
+        res.status(500).json({ error: "Failed to fetch inventory" });
+    }
 });
 
 app.get('/api/getOrders.json', async (req, res) => {
