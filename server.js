@@ -57,12 +57,12 @@ app.get('/api/getProducts.json', (req, res) => {
     res.json({ data: data });
 });
 
-// Endpoint nou pentru Inventar Real din Shopify
+// Endpoint Inventar cu suport opțional de filtrare după SKU: /api/getInventory.json?sku=P150
 app.get('/api/getInventory.json', async (req, res) => {
     try {
         const token = await getAccessToken();
-        
-        // 1. Preluăm toate produsele din Shopify pentru a mapa SKU-urile la inventory_item_id
+        const requestedSku = req.query.sku; // Filtru opțional de SKU
+
         const prodResponse = await axios.get(
             `https://${SHOPIFY_DOMAIN}/admin/api/2024-01/products.json`,
             { headers: { 'X-Shopify-Access-Token': token } }
@@ -78,9 +78,10 @@ app.get('/api/getInventory.json', async (req, res) => {
         });
 
         let inventoryData = [];
+        const skusToProcess = requestedSku ? [requestedSku] : Object.keys(catalogPantogar);
 
-        // 2. Pentru fiecare SKU din catalogul nostru, interogăm stocul pe locație
-        for (const sku of Object.keys(catalogPantogar)) {
+        for (const sku of skusToProcess) {
+            if (!catalogPantogar[sku]) continue;
             const inventoryItemId = inventoryItemsMap[sku];
             let qty = 0;
 
@@ -145,15 +146,24 @@ app.get('/api/getOrders.json', async (req, res) => {
     }
 });
 
+// Endpoint Articole cu suport opțional de filtrare după order_id: /api/getItems.json?order_id=XXX
 app.get('/api/getItems.json', async (req, res) => {
     try {
         const token = await getAccessToken();
+        const requestedOrderId = req.query.order_id; // Poate fi erp_id (ex: 9017405636942) sau ecommerce_id (ex: 1070)
+
         const response = await axios.get(
             `https://${SHOPIFY_DOMAIN}/admin/api/2024-01/orders.json?status=unfulfilled&fulfillment_status=unfulfilled`,
             { headers: { 'X-Shopify-Access-Token': token } }
         );
+        
         let deagorItems = [];
         response.data.orders.forEach(order => {
+            // Dacă s-a cerut un anumit order_id, filtrăm după el (verificăm atât ID-ul intern Shopify cât și numărul de comandă)
+            if (requestedOrderId && order.id.toString() !== requestedOrderId && order.order_number.toString() !== requestedOrderId) {
+                return;
+            }
+
             order.line_items.forEach(item => {
                 const sku = item.sku;
                 const produs = catalogPantogar[sku];
