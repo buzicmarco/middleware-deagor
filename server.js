@@ -32,6 +32,34 @@ async function getAccessToken() {
     }
 }
 
+// Funcție care garantează returnarea codului de țară în format ISO2 (ex: IT, US, GB)
+const countryNameMap = {
+    "ITALY": "IT", "ITALIA": "IT",
+    "ROMANIA": "RO", "ROMÂNIA": "RO",
+    "GERMANY": "DE", "DEUTSCHLAND": "DE", "GERMANIA": "DE",
+    "FRANCE": "FR", "FRANCIA": "FR",
+    "SPAIN": "ES", "ESPANA": "ES", "ESPAÑA": "ES", "SPAGNA": "ES",
+    "UNITED KINGDOM": "GB", "UK": "GB", "GREAT BRITAIN": "GB", "REGNO UNITO": "GB",
+    "UNITED STATES": "US", "USA": "US", "STATI UNITI": "US",
+    "AUSTRIA": "AT", "BELGIUM": "BE", "NETHERLANDS": "NL",
+    "POLAND": "PL", "SWITZERLAND": "CH", "SVIZZERA": "CH", "PORTUGAL": "PT"
+};
+
+function getIso2Country(order) {
+    const rawCode = order.shipping_address?.country_code || order.billing_address?.country_code;
+    if (rawCode && rawCode.trim().length === 2) {
+        return rawCode.trim().toUpperCase();
+    }
+    const rawName = (order.shipping_address?.country || order.billing_address?.country || "").trim().toUpperCase();
+    if (countryNameMap[rawName]) {
+        return countryNameMap[rawName];
+    }
+    if (rawName.length === 2) {
+        return rawName;
+    }
+    return "IT"; // Valoare implicită ISO2 dacă adresa nu are țara completată
+}
+
 const catalogPantogar = {
     "P150": { name: "Pantogar® 150 capsule", ean: "2008331000049" },
     "P300": { name: "Pantogar® 300 capsule", ean: "2008331000056" },
@@ -44,11 +72,17 @@ const catalogPantogar = {
     "P270": { name: "Pantogar® 270 capsule", ean: "2008331000032" }
 };
 
+// 1. Endpoint Produse - channel_product_id inclus obligatoriu
 app.get('/api/getProducts.json', (req, res) => {
-    const data = Object.keys(catalogPantogar).map(sku => ({
-        channel_product_id: sku,
+    const requestedSku = req.query.sku || req.query.channel_product_id;
+    const skusToReturn = requestedSku 
+        ? Object.keys(catalogPantogar).filter(s => s === requestedSku)
+        : Object.keys(catalogPantogar);
+
+    const data = skusToReturn.map(sku => ({
+        channel_product_id: String(sku),
         status: "1",
-        sku: sku,
+        sku: String(sku),
         name: catalogPantogar[sku].name,
         ean: catalogPantogar[sku].ean,
         price: "0.0000",
@@ -57,11 +91,11 @@ app.get('/api/getProducts.json', (req, res) => {
     res.json({ data: data });
 });
 
-// Endpoint Inventar cu suport opțional de filtrare după SKU: /api/getInventory.json?sku=P150
+// 2. Endpoint Inventar - include atât sku cât și channel_product_id
 app.get('/api/getInventory.json', async (req, res) => {
     try {
         const token = await getAccessToken();
-        const requestedSku = req.query.sku; // Filtru opțional de SKU
+        const requestedSku = req.query.sku || req.query.channel_product_id || req.query.product_id;
 
         const prodResponse = await axios.get(
             `https://${SHOPIFY_DOMAIN}/admin/api/2024-01/products.json`,
@@ -100,7 +134,8 @@ app.get('/api/getInventory.json', async (req, res) => {
             }
 
             inventoryData.push({
-                sku: sku,
+                channel_product_id: String(sku),
+                sku: String(sku),
                 location_id: SHOPIFY_LOCATION_ID || "1",
                 qty: qty.toString()
             });
@@ -113,6 +148,7 @@ app.get('/api/getInventory.json', async (req, res) => {
     }
 });
 
+// 3. Endpoint Comenzi - country strict în format ISO2 (2 litere)
 app.get('/api/getOrders.json', async (req, res) => {
     try {
         const token = await getAccessToken();
@@ -125,14 +161,14 @@ app.get('/api/getOrders.json', async (req, res) => {
             ecommerce_id: order.order_number.toString(),
             grand_total: "0.0000",
             order_created_at: order.created_at.replace("T", " ").substring(0, 19), 
-            firstname: order.shipping_address?.first_name || "",
-            lastname: order.shipping_address?.last_name || "",
-            city: order.shipping_address?.city || "",
-            postcode: order.shipping_address?.zip || "",
-            street_1: order.shipping_address?.address1 || "",
-            mobile: order.shipping_address?.phone || "0000000000",
-            country: order.shipping_address?.country_code || "",
-            region_code: order.shipping_address?.province_code || "",
+            firstname: order.shipping_address?.first_name || order.billing_address?.first_name || "",
+            lastname: order.shipping_address?.last_name || order.billing_address?.last_name || "",
+            city: order.shipping_address?.city || order.billing_address?.city || "",
+            postcode: order.shipping_address?.zip || order.billing_address?.zip || "",
+            street_1: order.shipping_address?.address1 || order.billing_address?.address1 || "",
+            mobile: order.shipping_address?.phone || order.billing_address?.phone || "0000000000",
+            country: getIso2Country(order),
+            region_code: order.shipping_address?.province_code || order.billing_address?.province_code || "",
             email: order.email || "",
             payment_method: "prepaid",
             payment_method_title: "Prepaid",
@@ -146,11 +182,11 @@ app.get('/api/getOrders.json', async (req, res) => {
     }
 });
 
-// Endpoint Articole cu suport opțional de filtrare după order_id: /api/getItems.json?order_id=XXX
+// 4. Endpoint Articole Comenzi - suportă filtrare după order_id și include channel_product_id
 app.get('/api/getItems.json', async (req, res) => {
     try {
         const token = await getAccessToken();
-        const requestedOrderId = req.query.order_id; // Poate fi erp_id (ex: 9017405636942) sau ecommerce_id (ex: 1070)
+        const requestedOrderId = req.query.order_id || req.query.erp_id || req.query.ecommerce_id;
 
         const response = await axios.get(
             `https://${SHOPIFY_DOMAIN}/admin/api/2024-01/orders.json?status=unfulfilled&fulfillment_status=unfulfilled`,
@@ -159,17 +195,18 @@ app.get('/api/getItems.json', async (req, res) => {
         
         let deagorItems = [];
         response.data.orders.forEach(order => {
-            // Dacă s-a cerut un anumit order_id, filtrăm după el (verificăm atât ID-ul intern Shopify cât și numărul de comandă)
             if (requestedOrderId && order.id.toString() !== requestedOrderId && order.order_number.toString() !== requestedOrderId) {
                 return;
             }
 
             order.line_items.forEach(item => {
-                const sku = item.sku;
+                const sku = item.sku || "";
                 const produs = catalogPantogar[sku];
                 deagorItems.push({
-                    channel_product_id: sku,
-                    sku: sku,
+                    order_id: order.id.toString(),
+                    ecommerce_id: order.order_number.toString(),
+                    channel_product_id: String(sku),
+                    sku: String(sku),
                     name: produs ? produs.name : item.name,
                     ean: produs ? produs.ean : "LIPSA_EAN",
                     qty: item.quantity.toString(),
@@ -185,6 +222,7 @@ app.get('/api/getItems.json', async (req, res) => {
     }
 });
 
+// 5. Endpoint AWB / Fulfillment Sync (POST)
 app.post('/api/awb-sync', async (req, res) => {
     const { order_id, tracking_number, carrier } = req.body; 
     try {
@@ -193,7 +231,7 @@ app.post('/api/awb-sync', async (req, res) => {
             fulfillment: {
                 location_id: SHOPIFY_LOCATION_ID, 
                 tracking_number: tracking_number,
-                tracking_company: carrier,
+                tracking_company: carrier || "GLS",
                 notify_customer: true
             }
         };
