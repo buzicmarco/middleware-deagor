@@ -44,6 +44,54 @@ const catalogPantogar = {
     "P270": { name: "Pantogar® 270 capsule", ean: "2008331000032" }
 };
 
+// Funcție ajutătoare care filtrează comenzile/articolele strict pentru locația Tissqua
+async function getFilteredOrders(token) {
+    const response = await axios.get(
+        `https://${SHOPIFY_DOMAIN}/admin/api/2024-01/orders.json?status=unfulfilled&fulfillment_status=unfulfilled`,
+        { headers: { 'X-Shopify-Access-Token': token } }
+    );
+    
+    if (!SHOPIFY_LOCATION_ID) {
+        return response.data.orders;
+    }
+
+    let filteredOrders = [];
+    for (const order of response.data.orders) {
+        try {
+            const foRes = await axios.get(
+                `https://${SHOPIFY_DOMAIN}/admin/api/2024-01/orders/${order.id}/fulfillment_orders.json`,
+                { headers: { 'X-Shopify-Access-Token': token } }
+            );
+            
+            let allowedLineItemIds = new Set();
+            if (foRes.data.fulfillment_orders) {
+                foRes.data.fulfillment_orders.forEach(fo => {
+                    if (String(fo.assigned_location_id) === String(SHOPIFY_LOCATION_ID) && fo.status !== 'closed' && fo.status !== 'cancelled') {
+                        fo.line_items.forEach(foItem => {
+                            if (foItem.fulfillable_quantity > 0) {
+                                allowedLineItemIds.add(foItem.line_item_id);
+                            }
+                        });
+                    }
+                });
+            }
+
+            const matchingLineItems = order.line_items.filter(item => allowedLineItemIds.has(item.id));
+            
+            if (matchingLineItems.length > 0) {
+                filteredOrders.push({
+                    ...order,
+                    line_items: matchingLineItems
+                });
+            }
+        } catch (err) {
+            // Fallback dacă nu se pot citi fulfillment orders: păstrăm comanda
+            filteredOrders.push(order);
+        }
+    }
+    return filteredOrders;
+}
+
 app.get('/api/getProducts.json', (req, res) => {
     const data = Object.keys(catalogPantogar).map(sku => ({
         channel_product_id: sku,
@@ -116,11 +164,9 @@ app.get('/api/getInventory.json', async (req, res) => {
 app.get('/api/getOrders.json', async (req, res) => {
     try {
         const token = await getAccessToken();
-        const response = await axios.get(
-            `https://${SHOPIFY_DOMAIN}/admin/api/2024-01/orders.json?status=unfulfilled&fulfillment_status=unfulfilled`,
-            { headers: { 'X-Shopify-Access-Token': token } }
-        );
-        const deagorOrders = response.data.orders.map(order => ({
+        const orders = await getFilteredOrders(token);
+
+        const deagorOrders = orders.map(order => ({
             erp_id: order.id.toString(),
             ecommerce_id: order.order_number.toString(),
             grand_total: "0.0000",
@@ -151,15 +197,10 @@ app.get('/api/getItems.json', async (req, res) => {
     try {
         const token = await getAccessToken();
         const requestedOrderId = req.query.order_id; // Poate fi erp_id (ex: 9017405636942) sau ecommerce_id (ex: 1070)
-
-        const response = await axios.get(
-            `https://${SHOPIFY_DOMAIN}/admin/api/2024-01/orders.json?status=unfulfilled&fulfillment_status=unfulfilled`,
-            { headers: { 'X-Shopify-Access-Token': token } }
-        );
+        const orders = await getFilteredOrders(token);
         
         let deagorItems = [];
-        response.data.orders.forEach(order => {
-            // Dacă s-a cerut un anumit order_id, filtrăm după el (verificăm atât ID-ul intern Shopify cât și numărul de comandă)
+        orders.forEach(order => {
             if (requestedOrderId && order.id.toString() !== requestedOrderId && order.order_number.toString() !== requestedOrderId) {
                 return;
             }
