@@ -85,8 +85,8 @@ async function getFilteredOrders(token) {
                 });
             }
         } catch (err) {
-            // Fallback dacă nu se pot citi fulfillment orders: păstrăm comanda
-            filteredOrders.push(order);
+            // PORTIȚA A FOST ÎNCHISĂ: Orice comandă care nu aparține strict de locația curentă este ignorată.
+            console.error(`Comanda ${order.id} a fost blocată/ignorată deoarece nu aparține locației Tissqua sau nu are permisiuni.`);
         }
     }
     return filteredOrders;
@@ -105,11 +105,10 @@ app.get('/api/getProducts.json', (req, res) => {
     res.json({ data: data });
 });
 
-// Endpoint Inventar cu suport opțional de filtrare după SKU: /api/getInventory.json?sku=P150
 app.get('/api/getInventory.json', async (req, res) => {
     try {
         const token = await getAccessToken();
-        const requestedSku = req.query.sku; // Filtru opțional de SKU
+        const requestedSku = req.query.sku; 
 
         const prodResponse = await axios.get(
             `https://${SHOPIFY_DOMAIN}/admin/api/2024-01/products.json`,
@@ -192,11 +191,10 @@ app.get('/api/getOrders.json', async (req, res) => {
     }
 });
 
-// Endpoint Articole cu suport opțional de filtrare după order_id: /api/getItems.json?order_id=XXX
 app.get('/api/getItems.json', async (req, res) => {
     try {
         const token = await getAccessToken();
-        const requestedOrderId = req.query.order_id; // Poate fi erp_id (ex: 9017405636942) sau ecommerce_id (ex: 1070)
+        const requestedOrderId = req.query.order_id; 
         const orders = await getFilteredOrders(token);
         
         let deagorItems = [];
